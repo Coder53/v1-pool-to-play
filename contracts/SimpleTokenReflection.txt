@@ -1,0 +1,88 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+
+contract SimpleTokenReflection is ERC20 {
+    address public routerAddress;
+    address public yieldManager;
+    address public taxWallet;
+    uint256 public taxRate;
+
+    constructor(
+        string memory name,
+        string memory symbol,
+        uint256 totalSupply_,
+        address routerAddress_,
+        address yieldManager_,
+        address taxWallet_,
+        uint256 taxRate_
+    ) ERC20(name, symbol) {
+        _mint(msg.sender, totalSupply_);
+        routerAddress = routerAddress_;
+        yieldManager = yieldManager_;
+        taxWallet = taxWallet_;
+        taxRate = taxRate_;
+    }
+
+    modifier onlyYieldManager() {
+        require(msg.sender == yieldManager);
+        _;
+    }
+
+    function setRouterAddress(
+        address routerAddress_
+    ) external onlyYieldManager {
+        routerAddress = routerAddress_;
+    }
+
+    function setTaxWallet(address taxWallet_) external onlyYieldManager {
+        taxWallet = taxWallet_;
+    }
+
+    function setTaxRate(uint256 taxRate_) external onlyYieldManager {
+        taxRate = taxRate_;
+    }
+
+    function transferYieldManager(
+        address yieldManager_
+    ) external onlyYieldManager {
+        yieldManager = yieldManager_;
+    }
+
+    function _transfer(
+        address from,
+        address to,
+        uint256 amount
+    ) internal override {
+        require(from != address(0), "ERC20: transfer from the zero address");
+        require(to != address(0), "ERC20: transfer to the zero address");
+
+        _beforeTokenTransfer(from, to, amount);
+
+        uint256 fromBalance = balanceOf(from);
+        require(
+            fromBalance >= amount,
+            "ERC20: transfer amount exceeds balance"
+        );
+        unchecked {
+            _balances[from] = fromBalance - amount;
+        }
+
+        //taxRate is in basis points. Denominated by 1000
+        if (from == routerAddress || to == routerAddress) {
+            uint256 amountToTaxWallet = (amount * taxRate) / 1000;
+
+            amount -= amountToTaxWallet;
+
+            _balances[taxWallet] += amountToTaxWallet;
+
+            emit Transfer(from, taxWallet, amountToTaxWallet); // Emitting transfer event for tax
+        }
+
+        _balances[to] += amount;
+
+        emit Transfer(from, to, amount);
+
+        _afterTokenTransfer(from, to, amount);
+    }
+}

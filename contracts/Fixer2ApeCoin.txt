@@ -1,0 +1,225 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.6;
+
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
+import "@pooltogether/v4-core/contracts/libraries/TwabLib.sol";
+import "./interfaces/ITournament.sol";
+import "hardhat/console.sol";
+
+//import "./CakePool.sol";
+import "./Tournament2ApeCoin.sol";
+
+contract Fixer2ApeCoin is Ownable {
+    using SafeERC20 for IERC20;
+
+    //ITournament public tournament;
+    address[] public tournament;
+
+    uint256 public constant MIN_DEPOSIT_AMOUNT = 0.00001 ether;
+
+    //CakePool public cakePool;
+
+    /// @notice Record of tickets total supply and ring buff parameters used for observation.
+    TwabLib.Account internal totalSupplyTwab;
+
+    uint256 latestTournamentId = 0;
+
+    mapping(address => uint256) public balanceOf;
+
+    //mapping(uint256 => TournamentTwabs) internal tournamentTwabs;
+
+    mapping(uint256 => mapping(address => uint)) tournamentPlacement;
+
+    struct RewardTiers {
+        //Reward percentage based on placement
+        mapping(uint256 => uint256) placementRewardPercentage;
+        //Last placement to receive rewards
+        uint256 lastPayablePlacement;
+    }
+
+    RewardTiers[] rewards;
+
+    /**
+     * @notice Emitted when a tournament is created.
+     * @param tournamentId Id of the newly created tournament
+     */
+    event TournamentCreated(
+        uint256 indexed tournamentId,
+        address tournamentAddress
+    );
+
+    /**
+     * @notice Emitted when a new TWAB has been recorded.
+     * @param delegate The recipient of the ticket power (may be the same as the user).
+     * @param newTwab Updated TWAB of a ticket holder after a successful TWAB recording.
+     */
+    event NewUserTwab(
+        address indexed delegate,
+        ObservationLib.Observation newTwab
+    );
+
+    /**
+     * @notice Emitted when a new total supply TWAB has been recorded.
+     * @param newTotalSupplyTwab Updated TWAB of tickets total supply after a successful total supply TWAB recording.
+     */
+    event NewTotalSupplyTwab(ObservationLib.Observation newTotalSupplyTwab);
+
+    event NewTournamentTwab(ObservationLib.Observation tournamentTwab);
+
+    event Deposit(
+        address _user,
+        uint256 _tournamentId,
+        uint256 _lockDuration,
+        uint256 _amount
+    );
+    event Withdraw(address _user, uint256 _tournamentId, uint256 _amount);
+
+    event SetPlacement(uint256 _tournamentId, address _user, uint placement);
+
+    event TournamentCreated2(ITournament.TournamentInfo _tournamentInfo);
+
+    // constructor() {
+    //     console.log("Fixer created!");
+    // }
+
+    function createTournament(
+        address _yieldSource,
+        IERC20 _stakeToken,
+        IERC20 _rewardToken,
+        uint256 _startTimestamp,
+        uint256 _endTimestamp,
+        uint256 _minStake
+    ) public onlyOwner returns (uint256) {
+        //console.log("creating tournament!");
+        require(
+            _endTimestamp > _startTimestamp,
+            "End Timestamp must be larger than start timestamp"
+        );
+
+        require(
+            _minStake >= MIN_DEPOSIT_AMOUNT,
+            "cannot deposit less than minimum deposit amount"
+        );
+
+        Tournament2 newTournament = new Tournament2(
+            _yieldSource,
+            _stakeToken,
+            _rewardToken,
+            _startTimestamp,
+            _endTimestamp,
+            _minStake,
+            msg.sender,
+            latestTournamentId
+        );
+
+        tournament.push(address(newTournament));
+        //console.log("tournament address: ", tournament[0]);
+
+        latestTournamentId++;
+
+        //might wanna add more params for the event
+        ITournament.TournamentInfo memory tournamentInfo = ITournament(
+            tournament[latestTournamentId - 1]
+        ).getTournamentInfo();
+
+        emit TournamentCreated2(tournamentInfo);
+        emit TournamentCreated(
+            latestTournamentId,
+            tournament[latestTournamentId - 1]
+        );
+
+        return latestTournamentId;
+    }
+
+    function harvestReward(uint256 _tournamentId) public onlyOwner {
+        require(
+            _tournamentId <= latestTournamentId,
+            "tournament does not exist"
+        );
+        address tournamentAddress = tournament[_tournamentId];
+        //require(ITournament(tournament).isPhase(ITournament.Phases.REWARD_COLLECTION), "Only can harvest rewards during REWARD_COLLECTION phase");
+        //harvest reward implementation
+        ITournament(tournamentAddress).collectYield();
+    }
+
+    /* ============ External Functions ============ */
+    //deposit
+    //uses delegate call to avoid performance fee, not sure if this works
+    function deposit(
+        uint256 _tournamentId,
+        uint256 _amount,
+        uint256 _lockDuration
+    ) external {
+        //token transfer
+        // ITournament.TournamentInfo memory tournamentInfo = tournament.getTournament(
+        //     _tournamentId
+        // );
+        address tournamentAddress = tournament[_tournamentId];
+        ITournament(tournamentAddress).deposit(_amount, _lockDuration);
+
+        emit Deposit(msg.sender, _tournamentId, _lockDuration, _amount);
+    }
+
+    //withdraw
+    function withdraw(uint256 _tournamentId, uint256 _amount) external {
+        address tournamentAddress = tournament[_tournamentId];
+        ITournament(tournamentAddress).withdraw(_amount);
+
+        emit Withdraw(msg.sender, _tournamentId, _amount);
+    }
+
+    function getUserRewards(
+        uint256 _tournamentId,
+        address _user
+    ) external view returns (uint256) {
+        address tournamentAddress = tournament[_tournamentId];
+        require(
+            _tournamentId <= latestTournamentId,
+            "tournament does not exist"
+        );
+        uint256 userRewards = ITournament(tournamentAddress).getUserRewards(
+            _user
+        );
+
+        return userRewards;
+    }
+
+    function getTournamentInfo(
+        uint256 _tournamentId
+    ) external view returns (ITournament.TournamentInfo memory) {
+        address tournamentAddress = tournament[_tournamentId];
+        require(
+            _tournamentId <= latestTournamentId,
+            "tournament does not exist"
+        );
+        ITournament.TournamentInfo memory tournamentInfo = ITournament(
+            tournamentAddress
+        ).getTournamentInfo();
+        return tournamentInfo;
+    }
+
+    //get leaderboard placement
+    function getPlacement(
+        uint256 _tournamentId,
+        address _user
+    ) external view returns (uint) {
+        address tournamentAddress = tournament[_tournamentId];
+        require(
+            _tournamentId <= latestTournamentId,
+            "tournament does not exist"
+        );
+
+        return ITournament(tournamentAddress).getPlacementByAddress(_user);
+    }
+
+    //for testing purposes
+    function printNumber(uint256 number) external view {
+        console.log(number);
+    }
+
+    //We take remainng rewards
+
+    /* ============ Internal Functions ============ */
+}

@@ -1,42 +1,11 @@
-/.yarn/*
-!/.yarn/releases
-!/.yarn/plugins
-!/.yarn/sdks
-
-# Swap the comments on the following lines if you don't wish to use zero-installs
-# Documentation here: https://yarnpkg.com/features/zero-installs
-#!/.yarn/cache
-/.pnp.*
-
-.envrc
-
-abis
-artifacts
-cache
 node_modules
-types
-
-# Build/Deploy Process
-build
-.build-openzeppelin
-deployments/local*
-deployments/fork*
-deployments/hardhat*
-
-# Tests
-test-results.xml
-
-# Solidity Coverage
+.env
 coverage
 coverage.json
-.history
+typechain
+typechain-types
 
-# OSX
-.DS_Store
+# Hardhat files
+cache
+artifacts
 
-# Development Notes
-Networks.md
-*.dev.md
-
-# Docs
-docs

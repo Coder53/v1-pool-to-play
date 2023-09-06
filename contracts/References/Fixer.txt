@@ -1,0 +1,632 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.6;
+
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
+import "@pooltogether/v4-core/contracts/libraries/TwabLib.sol";
+import "./interfaces/ITournament.sol";
+
+//import "./CakePool.sol";
+import "./Tournament.sol";
+
+contract Fixer is Ownable {
+    using SafeERC20 for IERC20;
+
+    //ITournament public immutable tournament;
+    address[] public tournament;
+
+    CakePool public cakePool;
+
+    /// @notice Record of tickets total supply and ring buff parameters used for observation.
+    TwabLib.Account internal totalSupplyTwab;
+
+    uint256 _latestTournamentId = 0;
+
+    mapping(address => uint256) public balanceOf;
+
+    mapping(uint256 => TournamentTwabs) internal tournamentTwabs;
+
+    mapping(uint256 => mapping(address => uint)) tournamentPlacement;
+
+    struct RewardTiers {
+        //Reward percentage based on placement
+        mapping(uint256 => uint256) placementRewardPercentage;
+        //Last placement to receive rewards
+        uint256 lastPayablePlacement;
+    }
+
+    /**
+     * @notice A struct containing details for an Account.
+     * @param balance The current balance for an Account.
+     * @param nextTwabIndex The next available index to store a new twab.
+     * @param cardinality The number of recorded twabs (plus one!).
+     */
+    // struct AccountDetails {
+    //     uint224 balance;
+    //     uint16 nextTwabIndex;
+    //     uint16 cardinality;
+    // }
+
+    // struct TournamentTwabs {
+    //     /// @notice Record of token holders TWABs for each account.
+    //     mapping(address => TwabLib.Account) userTwabs;
+    //     TwabLib.Account tournamentTwab;
+    // }
+
+    RewardTiers[] rewards;
+
+    /**
+     * @notice Emitted when a tournament is created.
+     * @param tournamentId Id of the newly created tournament
+     */
+    event TournamentCreated(uint256 indexed tournamentId);
+
+    /**
+     * @notice Emitted when a new TWAB has been recorded.
+     * @param delegate The recipient of the ticket power (may be the same as the user).
+     * @param newTwab Updated TWAB of a ticket holder after a successful TWAB recording.
+     */
+    event NewUserTwab(
+        address indexed delegate,
+        ObservationLib.Observation newTwab
+    );
+
+    /**
+     * @notice Emitted when a new total supply TWAB has been recorded.
+     * @param newTotalSupplyTwab Updated TWAB of tickets total supply after a successful total supply TWAB recording.
+     */
+    event NewTotalSupplyTwab(ObservationLib.Observation newTotalSupplyTwab);
+
+    event NewTournamentTwab(ObservationLib.Observation tournamentTwab);
+
+    event Deposit(address _user, uint256 _tournamentId, uint256 _lockDuration, uint256 _amount);
+    event Withdraw(address _user, uint256 _tournamentId, uint256 _amount);
+
+    event SetPlacement(uint256 _tournamentId, address _user, uint placement);
+
+    constructor(CakePool _cakePool) {
+        cakePool = _cakePool;
+    }
+
+    function createTournament(
+        address _yieldSource,
+        IERC20 _stakeToken,
+        IERC20 _rewardToken,
+        uint256 _startTimestamp,
+        uint256 _endTimestamp,
+        uint256 _minStake,
+        uint256 _tournamentId
+    ) public onlyOwner returns (uint256) {
+         require(
+            _endTimestamp > _startTimestamp,
+            "End Timestamp must be larger than start timestamp"
+        );
+
+        ITournament newTournament = new Tournament(
+            _yieldSource,
+            _stakeToken,
+            _rewardToken,
+            msg.sender,
+            _startTimestamp,
+            _endTimestamp,
+            _minStake,
+            _latestTournamentId
+        );
+
+        _latestTournamentId++;
+
+        // uint256 idx = rewards.length;
+        // rewards.push();
+        // RewardTiers storage tempRewards = rewards[idx];
+
+        //Default Rewards
+        // tempRewards.placementRewardPercentage[1] = 50;
+        // tempRewards.placementRewardPercentage[2] = 25;
+        // tempRewards.placementRewardPercentage[3] = 10;
+        // tempRewards.placementRewardPercentage[4] = 5;
+        // tempRewards.placementRewardPercentage[5] = 2;
+
+        // tempRewards.lastPayablePlacement = 10;
+
+        //might wanna add more params for the event
+        emit TournamentCreated(_latestTournamentId);
+
+        return _latestTournamentId;
+    }
+
+    function harvestReward(uint256 _tournamentId) public onlyOwner {
+        require(_tournamentId <= _latestTournamentId, "tournament does not exist");
+        address tournamentAddress = tournament[_tournamentId];
+        require(ITournament(tournament).isPhase(ITournament.Phases.REWARD_COLLECTION), "Only can harvest rewards during REWARD_COLLECTION phase");
+        //harvest reward implementation
+        ITournament(tournamentAddress).
+    }
+
+    /* ============ External Functions ============ */
+    //deposit
+    //uses delegate call to avoid performance fee, not sure if this works
+    function deposit(
+        uint256 _tournamentId,
+        uint256 _amount,
+        uint256 _lockDuration
+    ) external {
+        
+        //token transfer
+        ITournament.TournamentInfo memory tournamentInfo = tournament.getTournament(
+            _tournamentId
+        );
+        address tournamentAddress = tournament[_tournamentId];
+        ITournament(tournamentAddress).deposit(_amount, _lockDuration);
+
+        // _increaseUserTwab(_tournamentId, msg.sender, _amount);
+        // _increaseTotalSupplyTwab(_amount);
+
+        //get total tournamentTwab;
+        //cakePool.deposit(_amount, _lockDuration);
+
+        emit Deposit(msg.sender, _tournamentId, _lockDuration, _amount);
+    }
+
+    //withdraw
+    function withdraw(uint256 _tournamentId, uint256 _amount) external {
+        uint256 percentage = 0;
+        // require(
+        //     tournamentTwabs[_tournamentId]
+        //         .userTwabs[msg.sender]
+        //         .details
+        //         .balance > 0,
+        //     "Nothing to withdraw"
+        // );
+        // require(
+        //     tournamentTwabs[_tournamentId]
+        //         .userTwabs[msg.sender]
+        //         .details
+        //         .balance > _amount,
+        //     "Cannot withdraw more than available balance"
+        // );
+
+        // ITournament.TournamentInfo memory tournamentInfo = tournament.getTournament(
+        //     _tournamentId
+        // );
+
+
+        //percentage = _amount / balanceOf[msg.sender];
+        //_decreaseUserTwab(_tournamentId, msg.sender, _amount);
+        //cakePool.withdrawByAmount(_amount);
+        //tournamentInfo.token.approve(msg.sender, _amount);
+        //tournamentInfo.token.transferFrom(address(this), msg.sender, _amount);
+
+        address tournamentAddress = tournament[_tournamentId];
+        ITournament(tournamentAddress).withdraw(_amount);
+
+        emit Withdraw(msg.sender, _tournamentId, _amount);
+    }
+
+    //get rewards amount
+    //call from cakePool
+    // function pendingRewards(uint256 _tournamentId, address _user) external view returns(uint256) {
+    //    (uint256 shares, uint256 lastDepositedTime, uint256 cakeAtLastUserAction, uint256 lastUserActionTime, uint256 lockStartTime, uint256 lockEndTime, uint256 userBoostedShare, bool locked, uint256 lockedAmount) = cakePool.userInfo(address(this));
+
+    //     //uint256 pendingRewards = _tournamentID.
+    //     //return cakeAtLastUserAction;
+    // }
+
+    // function getUserRewards(uint256 _tournamentId, address _user) external view {
+    //     ITournament.TournamentInfo memory tournamentInfo = tournament.getTournament(_tournamentId);
+    //     uint256 tournamentTwab = TwabLib.getAverageBalanceBetween(
+    //             tournamentTwabs[_tournamentId].tournamentTwab.twabs,
+    //             tournamentTwabs[_tournamentId].tournamentTwab.details,
+    //             uint32(tournamentInfo.startTimeStamp),
+    //             uint32(tournamentInfo.endTimestamp),
+    //             uint32(block.timestamp)
+    //         );
+    //     uint256 tournamentRewards = getTournamentRewards(_tournamentId);
+    //     uint256 userRewards = getBalanceAt(_tournamentId, _user, uint64(tournamentInfo.startTimeStamp))/tournamentTwab;
+    //     userRewards = userRewards*tournamentRewards;
+    // }
+
+    function getUserRewards(uint256 _latestTournamentId, address _user) external view returns(uint256) {
+        address tournamentAddress = tournament[_tournamentId];
+         require(_tournamentId <= _latestTournamentId, "tournament does not exist");
+        uint256 userRewards = ITournament(tournamentAddress).getUserRewards(_user);
+
+        return userRewards;
+    }
+
+    function getAccountDetails(
+        uint256 _tournamentId,
+        address _user
+    ) external view returns (TwabLib.AccountDetails memory) {
+        return tournamentTwabs[_tournamentId].userTwabs[_user].details;
+    }
+
+    function getTwab(
+        uint256 _tournamentId,
+        address _user,
+        uint16 _index
+    ) external view returns (ObservationLib.Observation memory) {
+        return tournamentTwabs[_tournamentId].userTwabs[_user].twabs[_index];
+    }
+
+    function getBalanceAt(
+        uint256 _tournamentId,
+        address _user,
+        uint64 _target
+    ) public view returns (uint256) {
+        TwabLib.Account storage account = tournamentTwabs[_tournamentId]
+            .userTwabs[_user];
+
+        return
+            TwabLib.getBalanceAt(
+                account.twabs,
+                account.details,
+                uint32(_target),
+                uint32(block.timestamp)
+            );
+    }
+
+    //twab weighted amount
+    // function getAverageBalancesBetween(
+    //     uint256 _tournamentId,
+    //     address _user,
+    //     uint64[] calldata _startTimes,
+    //     uint64[] calldata _endTimes
+    // ) external view returns (uint256[] memory) {
+    //     return
+    //         _getAverageBalancesBetween(
+    //             tournamentTwabs[_tournamentId].userTwabs[_user],
+    //             _startTimes,
+    //             _endTimes
+    //         );
+    // }
+
+    // function getAverageTotalSuppliesBetween(
+    //     uint64[] calldata _startTimes,
+    //     uint64[] calldata _endTimes
+    // ) external view returns (uint256[] memory) {
+    //     return
+    //         _getAverageBalancesBetween(totalSupplyTwab, _startTimes, _endTimes);
+    // }
+
+    function getAverageBalanceBetween(
+        uint256 _tournamentId,
+        address _user,
+        uint64 _startTime,
+        uint64 _endTime
+    ) external view returns (uint256) {
+        TwabLib.Account storage account = tournamentTwabs[_tournamentId]
+            .userTwabs[_user];
+
+        return
+            TwabLib.getAverageBalanceBetween(
+                account.twabs,
+                account.details,
+                uint32(_startTime),
+                uint32(_endTime),
+                uint32(block.timestamp)
+            );
+    }
+
+    // function getBalancesAt(
+    //     uint256 _tournamentId,
+    //     address _user,
+    //     uint64[] calldata _targets
+    // ) external view returns (uint256[] memory) {
+    //     uint256 length = _targets.length;
+    //     uint256[] memory _balances = new uint256[](length);
+
+    //     TwabLib.Account storage twabContext = tournamentTwabs[_tournamentId]
+    //         .userTwabs[_user];
+    //     TwabLib.AccountDetails memory details = twabContext.details;
+
+    //     for (uint256 i = 0; i < length; i++) {
+    //         _balances[i] = TwabLib.getBalanceAt(
+    //             twabContext.twabs,
+    //             details,
+    //             uint32(_targets[i]),
+    //             uint32(block.timestamp)
+    //         );
+    //     }
+
+    //     return _balances;
+    // }
+
+    // function getTotalSupplyAt(uint64 _target) public view returns (uint256) {
+    //     return
+    //         TwabLib.getBalanceAt(
+    //             totalSupplyTwab.twabs,
+    //             totalSupplyTwab.details,
+    //             uint32(_target),
+    //             uint32(block.timestamp)
+    //         );
+    // }
+
+    // function getTotalSuppliesAt(
+    //     uint64[] calldata _targets
+    // ) external view returns (uint256[] memory) {
+    //     uint256 length = _targets.length;
+    //     uint256[] memory totalSupplies = new uint256[](length);
+
+    //     TwabLib.AccountDetails memory details = totalSupplyTwab.details;
+
+    //     for (uint256 i = 0; i < length; i++) {
+    //         totalSupplies[i] = TwabLib.getBalanceAt(
+    //             totalSupplyTwab.twabs,
+    //             details,
+    //             uint32(_targets[i]),
+    //             uint32(block.timestamp)
+    //         );
+    //     }
+
+    //     return totalSupplies;
+    // }
+
+    //get leaderboard placement
+    function getPlacement(
+        uint256 _tournamentId,
+        address _user
+    ) external view returns (uint) {
+        //ITournament.Tournament memory tournamentInfo = tournament.getTournament(_tournamentId);
+
+        //return tournamentInfo.placement[_user];
+        return tournamentPlacement[_tournamentId][_user];
+    }
+
+    //We take remainng rewards
+
+    /* ============ Internal Functions ============ */
+    /**
+     * @notice Retrieves the average balances held by a user for a given time frame.
+     * @param _account The user whose balance is checked.
+     * @param _startTimes The start time of the time frame.
+     * @param _endTimes The end time of the time frame.
+     * @return The average balance that the user held during the time frame.
+     */
+    // function _getAverageBalancesBetween(
+    //     TwabLib.Account storage _account,
+    //     uint64[] calldata _startTimes,
+    //     uint64[] calldata _endTimes
+    // ) internal view returns (uint256[] memory) {
+    //     uint256 startTimesLength = _startTimes.length;
+    //     require(
+    //         startTimesLength == _endTimes.length,
+    //         "Ticket/start-end-times-length-match"
+    //     );
+
+    //     TwabLib.AccountDetails memory accountDetails = _account.details;
+
+    //     uint256[] memory averageBalances = new uint256[](startTimesLength);
+    //     uint32 currentTimestamp = uint32(block.timestamp);
+
+    //     for (uint256 i = 0; i < startTimesLength; i++) {
+    //         averageBalances[i] = TwabLib.getAverageBalanceBetween(
+    //             _account.twabs,
+    //             accountDetails,
+    //             uint32(_startTimes[i]),
+    //             uint32(_endTimes[i]),
+    //             currentTimestamp
+    //         );
+    //     }
+
+    //     return averageBalances;
+    // }
+
+    /**
+     * @notice Increase `_to` TWAB balance.
+     * @param _to Address of the delegate.
+     * @param _amount Amount of tokens to be added to `_to` TWAB balance.
+     */
+    // function _increaseUserTwab(
+    //     uint256 _tournamentId,
+    //     address _to,
+    //     uint256 _amount
+    // ) internal {
+    //     if (_amount == 0) {
+    //         return;
+    //     }
+
+    //     TwabLib.Account storage _account = tournamentTwabs[_tournamentId]
+    //         .userTwabs[_to];
+
+    //     (
+    //         TwabLib.AccountDetails memory accountDetails,
+    //         ObservationLib.Observation memory twab,
+    //         bool isNew
+    //     ) = TwabLib.increaseBalance(
+    //             _account,
+    //             uint208(_amount),
+    //             uint32(block.timestamp)
+    //         );
+
+    //     _account.details = accountDetails;
+
+    //     if (isNew) {
+    //         emit NewUserTwab(_to, twab);
+    //     }
+    // }
+
+    /**
+     * @notice Decrease `_to` TWAB balance.
+     * @param _to Address of the delegate.
+     * @param _amount Amount of tokens to be added to `_to` TWAB balance.
+     */
+    // function _decreaseUserTwab(
+    //     uint256 _tournamentId,
+    //     address _to,
+    //     uint256 _amount
+    // ) internal {
+    //     if (_amount == 0) {
+    //         return;
+    //     }
+
+    //     TwabLib.Account storage _account = tournamentTwabs[_tournamentId]
+    //         .userTwabs[_to];
+
+    //     (
+    //         TwabLib.AccountDetails memory accountDetails,
+    //         ObservationLib.Observation memory twab,
+    //         bool isNew
+    //     ) = TwabLib.decreaseBalance(
+    //             _account,
+    //             uint208(_amount),
+    //             "Ticket/twab-burn-lt-balance",
+    //             uint32(block.timestamp)
+    //         );
+
+    //     _account.details = accountDetails;
+
+    //     if (isNew) {
+    //         emit NewUserTwab(_to, twab);
+    //     }
+    // }
+
+    /// @param _amount The amount to decrease the total by
+    // function _decreaseTotalSupplyTwab(uint256 _amount) internal {
+    //     if (_amount == 0) {
+    //         return;
+    //     }
+
+    //     (
+    //         TwabLib.AccountDetails memory accountDetails,
+    //         ObservationLib.Observation memory tsTwab,
+    //         bool tsIsNew
+    //     ) = TwabLib.decreaseBalance(
+    //             totalSupplyTwab,
+    //             uint208(_amount),
+    //             "Ticket/burn-amount-exceeds-total-supply-twab",
+    //             uint32(block.timestamp)
+    //         );
+
+    //     totalSupplyTwab.details = accountDetails;
+
+    //     if (tsIsNew) {
+    //         emit NewTotalSupplyTwab(tsTwab);
+    //     }
+    // }
+
+    /// @param _amount The amount to increase the total by
+    // function _increaseTotalSupplyTwab(uint256 _amount) internal {
+    //     if (_amount == 0) {
+    //         return;
+    //     }
+
+    //     (
+    //         TwabLib.AccountDetails memory accountDetails,
+    //         ObservationLib.Observation memory _totalSupply,
+    //         bool tsIsNew
+    //     ) = TwabLib.increaseBalance(
+    //             totalSupplyTwab,
+    //             uint208(_amount),
+    //             uint32(block.timestamp)
+    //         );
+
+    //     totalSupplyTwab.details = accountDetails;
+
+    //     if (tsIsNew) {
+    //         emit NewTotalSupplyTwab(_totalSupply);
+    //     }
+    // }
+
+    /// @param _amount The amount to decrease the total by
+    // function _decreaseTournamentTwab(
+    //     uint256 _tournamentId,
+    //     uint256 _amount
+    // ) internal {
+    //     if (_amount == 0) {
+    //         return;
+    //     }
+
+    //     (
+    //         TwabLib.AccountDetails memory accountDetails,
+    //         ObservationLib.Observation memory _tournamentTwab,
+    //         bool tsIsNew
+    //     ) = TwabLib.decreaseBalance(
+    //             tournamentTwabs[_tournamentId].tournamentTwab,
+    //             uint208(_amount),
+    //             "Ticket/burn-amount-exceeds-total-supply-twab",
+    //             uint32(block.timestamp)
+    //         );
+
+    //     tournamentTwabs[_tournamentId].tournamentTwab.details = accountDetails;
+
+    //     if (tsIsNew) {
+    //         emit NewTournamentTwab(_tournamentTwab);
+    //     }
+    // }
+
+    /// @param _amount The amount to increase the total by
+    // function _increaseTournamentTwab(
+    //     uint256 _tournamentId,
+    //     uint256 _amount
+    // ) internal {
+    //     if (_amount == 0) {
+    //         return;
+    //     }
+
+    //     (
+    //         TwabLib.AccountDetails memory accountDetails,
+    //         ObservationLib.Observation memory _tournamenTwab,
+    //         bool tsIsNew
+    //     ) = TwabLib.increaseBalance(
+    //             tournamentTwabs[_tournamentId].tournamentTwab,
+    //             uint208(_amount),
+    //             uint32(block.timestamp)
+    //         );
+
+    //     tournamentTwabs[_tournamentId].tournamentTwab.details = accountDetails;
+
+    //     if (tsIsNew) {
+    //         emit NewTournamentTwab(_tournamenTwab);
+    //     }
+    // }
+
+    // function getTournamentRewards(
+    //     uint256 _tournamentId
+    // ) internal view returns (uint256) {
+    //     (
+    //         uint256 shares,
+    //         uint256 lastDepositedTime,
+    //         uint256 cakeAtLastUserAction,
+    //         uint256 lastUserActionTime,
+    //         uint256 lockStartTime,
+    //         uint256 lockEndTime,
+    //         uint256 userBoostedShare,
+    //         bool locked,
+    //         uint256 lockedAmount
+    //     ) = cakePool.userInfo(address(this));
+    //     //uint256 tournamentRewards = ((tournamentTwabs[_tournamentId].tournamentTwab.details.balance)/(totalSupplyTwab.details.balance))*cakeAtLastUserAction;
+    //     ITournament.TournamentInfo memory tournamentInfo = tournament.getTournament(
+    //         _tournamentId
+    //     );
+    //     uint256 startTime;
+    //     uint256 tournamentLength = tournament.tournamentLength();
+
+    //     //if tournament has not end(rewards not yet harvest)
+    //     // if (tournamentInfo.endTimestamp > block.endTimestamp) {
+    //     //     for (uint256 index = 0; index < tournamentLength; index++) {
+    //     //         tournamentInfo = tournament.getTournament(index);
+    //     //         //if tournament not yet end
+    //     //         if (tournamentInfo.endTimestamp < block.timestamp) {
+    //     //             startTime = tournamentInfo.startTimeStamp;
+    //     //         }
+    //     //     }
+            
+    //     // }
+    //     //assume totalSuply is twab from start to targeted timestamp
+    //     uint256 totalSupply = getTotalSupplyAt(uint64(block.timestamp));
+        
+    //     uint256 tournamentTwab = TwabLib.getAverageBalanceBetween(
+    //             tournamentTwabs[_tournamentId].tournamentTwab.twabs,
+    //             tournamentTwabs[_tournamentId].tournamentTwab.details,
+    //             uint32(tournamentInfo.startTimeStamp),
+    //             uint32(tournamentInfo.endTimestamp),
+    //             uint32(block.timestamp)
+    //         );
+
+    //     uint256 tournamentRewards = (tournamentTwab/totalSupply)*cakeAtLastUserAction;
+    //     return tournamentRewards;
+    // }
+
+    
+}
