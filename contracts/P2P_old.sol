@@ -11,12 +11,17 @@ import "./ITournament.sol";
 contract P2P is ITournament, Ownable {
     using SafeERC20 for IERC20;
     uint8 public currentPhase;
+    uint256 DEFAULT_LAST_PAYABLE_PLACEMENT = 10;
     uint256 public constant PRECISION_FACTOR = 1e12; // precision factor.
-    uint256 public constant ETH_TOKEN_ID = 0;
+    uint256 public constant TREASURY_TAX = 30; //30%
     ERC20Balance[] internal _yieldManagerFundsBefore;
     ERC20Balance[] internal _yieldManagerFundsAfter;
+    uint256 public prizePool;
     mapping(uint256 => uint256) public totalStaked;
+    address public treasury;
     address public lockStaking;
+    bool internal _rewardsCollectedBool;
+    bool internal _setPlayerPlacementBool;
     /**
      * @notice Latest recorded tournament id.
      * @dev Starts at 0 and is incremented by 1 for each new tournament. So the first tournament will have id 0, the second 1, etc.
@@ -25,13 +30,24 @@ contract P2P is ITournament, Ownable {
     TournamentInfo public tournamentInfo;
     PlayerInfo[] public tournamentPlayersInfo;
     TournamentTwabs internal _tournamentTwabs;
+    mapping(address => uint256) internal twabSharesForNonTopPlayers;
     mapping(address => uint256) internal _stakedAmount;
+    mapping(address => bool) internal _collectedRewards;
 
     struct TournamentTwabs {
         /// @notice Record of token holders TWABs for each account.
         mapping(address => mapping(uint256 => TwabLib.Account)) userTwabs;
         TwabLib.Account tournamentTwab;
     }
+
+    struct RewardTiers {
+        //Reward percentage based on placement
+        uint256[] placementRewardPercentage;
+        //Only top players will receive share of yield generated, the rest wil share based on TWAB
+        uint256 topPlayersPayablePlacement;
+    }
+
+    RewardTiers public rewardTiers;
 
     /**
      * @notice Dashboard UI stats
@@ -130,26 +146,29 @@ contract P2P is ITournament, Ownable {
     event DepositERC20(address _user, uint256 _tokenID, uint256 _amount);
 
     /**
-     * @notice Emitted when a new deposit has occur
-     * @param _user the address who deposited
-     * @param _amount deposit amount
-     */
-    event DepositETH(address _user, uint256 _amount);
-
-    /**
-     * @notice Emitted when a new withdraw has occur
-     * @param _user the address who withdraw
-     * @param _tokenID index for the ERC20 token
-     * @param _amount deposit amount
-     */
-    event WithdrawERC20(address _user, uint256 _tokenID, uint256 _amount);
-
-    /**
      * @notice Emitted when a new withdraw has occur
      * @param _user the address who withdraw
      * @param _amount deposit amount
      */
-    event WithdrawETH(address _user, uint256 _amount);
+    event WithdrawTournament(address _user, uint256 _amount);
+
+    /**
+     * @notice Emitted when yield is collected from ApeCoinStaking
+     * @param _balanceBefore balance before collecting yield
+     * @param _balanceAfter balance after collected yield
+     * @param _rewardsCollected total yield collected
+     * @param _taxCollected tax collected and sent to treasury
+     * @param _prizePool prize pool to be distribute to players
+     * @param _timeStamp timestamp when the yield is collected
+     */
+    event collectedYield(
+        uint256 _balanceBefore,
+        uint256 _balanceAfter,
+        uint256 _rewardsCollected,
+        uint256 _taxCollected,
+        uint256 _prizePool,
+        uint256 _timeStamp
+    );
 
     /**
      * @notice Emitted when a user has collected rewards
@@ -157,6 +176,13 @@ contract P2P is ITournament, Ownable {
      * @param _userRewards amount of rewards collected
      */
     event UserCollectedRewards(address _user, uint256 _userRewards);
+
+    /**
+     * @notice Emitted when a new trewasury address has been set
+     * @param _oldTreasury address of the old treasury
+     * @param _newTreasury address of the new treasury
+     */
+    event SetTreasury(address _oldTreasury, address _newTreasury);
 
     /**
      * @notice Emitted when a new placement reward percentage was set
@@ -187,6 +213,13 @@ contract P2P is ITournament, Ownable {
         address _newYieldManager,
         uint256 _transferTimestamp
     );
+
+    /**
+     * @notice Emitted when player's placement was set
+     * @param _player array of player to set placement
+     * @param _placement placement set for the corresponding player array
+     */
+    event SetPlayerPlacement(address[] _player, uint256[] _placement);
 
     /**
      * @notice Emmited with new stake token was added
@@ -232,6 +265,7 @@ contract P2P is ITournament, Ownable {
      * @param _minStake minimum stake amount
      * @param _tournamentManager tournament manager
      * @param _yieldManager yield manager
+     * @param _treasury address of treasury
      */
     constructor(
         address _stakeToken,
@@ -239,11 +273,11 @@ contract P2P is ITournament, Ownable {
         uint256 _endTimeStamp,
         uint256 _minStake,
         address _tournamentManager,
-        address _yieldManager
+        address _yieldManager,
+        address _treasury
     ) {
-        address[] memory stakeToken = new address[](2);
-        stakeToken[0] = 0x0000000000000000000000000000000000000000; //reserved for ETH
-        stakeToken[1] = _stakeToken; //reserved for first ERC20 token
+        address[] memory stakeToken = new address[](1);
+        stakeToken[0] = _stakeToken;
         tournamentInfo = TournamentInfo({
             stakeToken: stakeToken,
             tournamentManager: _tournamentManager,
@@ -261,6 +295,23 @@ contract P2P is ITournament, Ownable {
         _yieldManagerFundsAfter.push(
             ERC20Balance({tokenAddress: address(_stakeToken), tokenBalance: 0})
         );
+
+        treasury = _treasury;
+
+        //Default Rewards Model
+        RewardTiers storage tempRewards = rewardTiers;
+
+        //Top players will receive rewards based on their placement
+        //Remaining will be receive rewards divided among each other based on twab
+        tempRewards.placementRewardPercentage.push(0);
+        tempRewards.placementRewardPercentage.push(30);
+        tempRewards.placementRewardPercentage.push(20);
+        tempRewards.placementRewardPercentage.push(10);
+
+        //Only top players will be rewarded based on share if yield generated
+        tempRewards.topPlayersPayablePlacement =
+            tempRewards.placementRewardPercentage.length -
+            1;
 
         emit TournamentCreated(tournamentInfo);
     }
@@ -315,6 +366,51 @@ contract P2P is ITournament, Ownable {
     }
 
     /**
+     * @notice set rewards(percentage) for the respective placement
+     * example: [50, 25, 15, 5]
+     * Placement    Rewards in percentage
+     * 1            50
+     * 2            25
+     * 3            15
+     * 4            5
+     */
+    function setPlacementRewardPercentage(
+        uint256[] calldata _rewardsPercentage
+    ) external {
+        _requireTournamentManager();
+
+        delete rewardTiers;
+
+        rewardTiers.placementRewardPercentage.push(0);
+
+        for (uint256 i = 0; i < _rewardsPercentage.length; i++) {
+            rewardTiers.placementRewardPercentage.push(_rewardsPercentage[i]);
+        }
+
+        //Only top X players will be rewarded based on share if yield generated
+        //where X is the length of the _rewardsPercentage array
+        rewardTiers.topPlayersPayablePlacement =
+            rewardTiers.placementRewardPercentage.length -
+            1;
+
+        emit SetPlacementRewardPercentage(_rewardsPercentage);
+    }
+
+    /**
+     * @notice set new treasury address
+     * @param _treasury new treasury address
+     */
+    function setTreasury(address _treasury) external {
+        _requireTournamentManager();
+
+        address oldTreasury = treasury;
+
+        treasury = _treasury;
+
+        emit SetTreasury(oldTreasury, treasury);
+    }
+
+    /**
      * @notice set lockStaking address
      * @param _lockStaking address of lockStaking
      */
@@ -355,15 +451,11 @@ contract P2P is ITournament, Ownable {
     ) external {
         _requireYieldManager();
 
-        if (_tokenID == 0) {
-            payable(tournamentInfo.yieldManager).transfer(_amount);
-        } else {
-            IERC20(tournamentInfo.stakeToken[_tokenID]).transferFrom(
-                address(this),
-                tournamentInfo.yieldManager,
-                _amount
-            );
-        }
+        IERC20(tournamentInfo.stakeToken[_tokenID]).transferFrom(
+            address(this),
+            tournamentInfo.yieldManager,
+            _amount
+        );
 
         uint256 balanceBefore = _yieldManagerFundsBefore[_tokenID].tokenBalance;
         _yieldManagerFundsBefore[_tokenID].tokenBalance += _amount;
@@ -431,9 +523,15 @@ contract P2P is ITournament, Ownable {
      * @notice reset tournament state
      * @dev use when tournament has ended and tournament manager want to start a new tournament
      * @dev tournament phase will be set to PREPARATION phase
+     * @dev all player's placement and prizepool will be reset
      */
     function resetTournamentState() internal {
         _requireTournamentManager();
+
+        //Reset twabs for non top players
+        for (uint256 i = 0; i < tournamentPlayersInfo.length; i++) {
+            twabSharesForNonTopPlayers[tournamentPlayersInfo[i].player] = 0;
+        }
 
         //Reset all player's placement
         for (uint256 i = 0; i < tournamentPlayersInfo.length; i++) {
@@ -450,21 +548,57 @@ contract P2P is ITournament, Ownable {
             _yieldManagerFundsAfter[i].tokenBalance = 0;
         }
 
+        _setPlayerPlacementBool = false;
+
         setTournamentPhase(0);
 
-        //delete tournamentInfo;
+        _rewardsCollectedBool = false;
+
+        prizePool = 0;
+
+        delete tournamentInfo;
+    }
+
+    /**
+     * @notice set player's placement
+     * @param _player player's address array
+     * @param _placement player's placement array
+     * @dev player's address array and _placement array must be the same length
+     * */
+    function setPlayerPlacement(
+        address[] calldata _player,
+        uint256[] calldata _placement
+    ) external {
+        bool exist;
+        uint256 index;
+
+        _requireTournamentManager();
+
+        require(
+            _player.length == _placement.length,
+            "Number of addresses must be the same as number of placement"
+        );
+
+        for (uint256 i = 0; i < _player.length; i++) {
+            (exist, index) = getUserIndex(_player[i]);
+            require(exist, "Player does not exist");
+            tournamentPlayersInfo[index].placement = _placement[i];
+        }
+
+        _setPlayerPlacementBool = true;
+
+        //emit event, not sure whats the best event to emit, need to see backend need what info
+        emit SetPlayerPlacement(_player, _placement);
     }
 
     /* ============ External Functions ============ */
     /**
-     * @notice call by player to deposit ERC20 token to participate in the tournament
+     * @notice call by player to deposit APE coin to participate in the tournament
      * @param _amount amount to deposit
      */
     function depositERC20(uint256 _tokenID, uint256 _amount) external override {
         bool exist;
         uint256 index;
-
-        require(_tokenID != 0, "cannot deposit ETH using this function");
 
         require(_amount > 0, "Nothing to deposit");
 
@@ -496,44 +630,24 @@ contract P2P is ITournament, Ownable {
         } else {
             //user deposit this token before
             tournamentPlayersInfo[index].stakedAmount[_tokenID] += _amount;
+            // if (tournamentPlayersInfo[index].stakedAmount[_tokenID] != 0) {
+
+            // } else {
+            //     tournamentPlayersInfo[index].stakedAmount.push(
+            //         ERC20Balance({
+            //             tokenAddress: address(
+            //                 tournamentInfo.stakeToken[_tokenID]
+            //             ),
+            //             tokenBalance: _amount
+            //         })
+            //     );
+            // }
         }
 
         totalStaked[_tokenID] += _amount;
         _increaseUserTwab(msg.sender, _tokenID, _amount);
 
         emit DepositERC20(msg.sender, _tokenID, _amount);
-    }
-
-    /**
-     * @notice call by player to deposit ETH to participate in the tournament
-     */
-    function depositETH() external payable override {
-        bool exist;
-        uint256 index;
-
-        require(msg.value > 0, "Nothing to deposit");
-
-        require((msg.sender).balance > msg.value, "insufficient balance");
-
-        (exist, index) = getUserIndex(msg.sender);
-        if (!exist) {
-            PlayerInfo storage playerInfo = tournamentPlayersInfo.push();
-            playerInfo.player = msg.sender;
-            playerInfo.placement = 0;
-            playerInfo.stakedAmount[ETH_TOKEN_ID] = msg.value;
-            playerInfo.lockedAmount[ETH_TOKEN_ID] = 0;
-            playerInfo.rewardsDebt = 0;
-            playerInfo.collectedRewards = false;
-        } else {
-            //user deposit this token before
-            tournamentPlayersInfo[index].stakedAmount[ETH_TOKEN_ID] += msg
-                .value;
-        }
-
-        totalStaked[ETH_TOKEN_ID] += msg.value;
-        _increaseUserTwab(msg.sender, ETH_TOKEN_ID, msg.value);
-
-        emit DepositERC20(msg.sender, ETH_TOKEN_ID, msg.value);
     }
 
     /**
@@ -545,9 +659,6 @@ contract P2P is ITournament, Ownable {
         uint256 index;
 
         _requireLockStaking();
-
-        require(_tokenID != 0, "cannot lock deposit ETH");
-
         require(_amount > 0, "Nothing to deposit");
 
         IERC20(tournamentInfo.stakeToken[_tokenID]).transferFrom(
@@ -586,14 +697,9 @@ contract P2P is ITournament, Ownable {
      * @param _amount amount to withdraw
      * @dev can only withdraw during REWARD_COLLECTION phase
      */
-    function withdrawERC20(
-        uint256 _tokenID,
-        uint256 _amount
-    ) external override {
+    function withdraw(uint256 _tokenID, uint256 _amount) external override {
         bool exist;
         uint256 index;
-
-        require(_tokenID != 0, "cannot withdraw ETH using this function");
 
         (exist, index) = getUserIndex(msg.sender);
         require(exist, "Player does not exist");
@@ -623,45 +729,7 @@ contract P2P is ITournament, Ownable {
 
         _decreaseUserTwab(msg.sender, _tokenID, _amount);
 
-        emit WithdrawERC20(msg.sender, _tokenID, _amount);
-    }
-
-    /**
-     * @notice call by player to withdraw deposited APE coin to withdraw from tournament
-     * @param _amount amount to withdraw
-     * @dev can only withdraw during REWARD_COLLECTION phase
-     */
-    function withdrawETH(uint256 _amount) external payable override {
-        bool exist;
-        uint256 index;
-        address payable user = payable(msg.sender);
-
-        (exist, index) = getUserIndex(msg.sender);
-        require(exist, "Player does not exist");
-        require(
-            tournamentPlayersInfo[index].stakedAmount[ETH_TOKEN_ID] > 0,
-            "Nothing to withdraw"
-        );
-
-        require(
-            tournamentPlayersInfo[index].stakedAmount[ETH_TOKEN_ID] >= _amount,
-            "Cannot withdraw more than available balance"
-        );
-
-        require(
-            _isPhase(Phases.REWARD_COLLECTION),
-            "Only can withdraw during REWARD_COLLECTION Phase"
-        );
-
-        tournamentPlayersInfo[index].stakedAmount[ETH_TOKEN_ID] -= _amount;
-
-        totalStaked[ETH_TOKEN_ID] -= _amount;
-
-        user.transfer(_amount);
-
-        _decreaseUserTwab(msg.sender, ETH_TOKEN_ID, _amount);
-
-        emit WithdrawETH(msg.sender, _amount);
+        emit WithdrawTournament(msg.sender, _amount);
     }
 
     /**
@@ -676,12 +744,8 @@ contract P2P is ITournament, Ownable {
         bool exist;
         uint256 index;
         _requireLockStaking();
-        require(_tokenID != 0, "cannot lock deposit ETH");
-
         (exist, index) = getUserIndex(tx.origin);
-
         require(exist, "Player does not exist");
-
         require(
             tournamentPlayersInfo[index].lockedAmount[_tokenID] > 0,
             "Nothing to withdraw"
@@ -710,7 +774,7 @@ contract P2P is ITournament, Ownable {
 
         _decreaseUserTwab(tx.origin, _tokenID, _amount);
 
-        emit WithdrawERC20(tx.origin, _tokenID, _amount);
+        emit WithdrawTournament(tx.origin, _amount);
     }
 
     /**
@@ -754,6 +818,17 @@ contract P2P is ITournament, Ownable {
                 tournamentStartTimestamp: tournamentInfo.startTimeStamp,
                 tournamentEndTimestamp: tournamentInfo.endTimeStamp
             });
+    }
+
+    /**
+     * @notice get the rewards(percentage) corresponding to the placement
+     */
+    function getPlacementRewardPercentage()
+        external
+        view
+        returns (uint256[] memory)
+    {
+        return rewardTiers.placementRewardPercentage;
     }
 
     /**
@@ -857,6 +932,59 @@ contract P2P is ITournament, Ownable {
 
         //Bring forward user's stake and reward
         //Need to make sure user's stake did not get reset
+    }
+
+    // /**
+    //  * @notice claim rewards for caller
+    //  * @dev can only be called during REWARD_COLLECTION phase
+    //  */
+    // function claimSelfRewards() external {
+    //     bool exist;
+    //     uint256 userRewards;
+    //     uint256 userIndex;
+
+    //     require(
+    //         _isPhase(Phases.REWARD_COLLECTION),
+    //         "Only can deposit during REWARD_COLLECTION Phase"
+    //     );
+
+    //     (exist, userIndex) = getUserIndex(msg.sender);
+    //     require(exist, "Player does not exist");
+    //     userRewards = tournamentPlayersInfo[userIndex].rewardsDebt;
+    //     require(userRewards > 0, "No rewards to claim");
+
+    //     tournamentInfo.rewardToken.transfer(msg.sender, userRewards);
+
+    //     tournamentPlayersInfo[userIndex].rewardsDebt = 0;
+
+    //     emit UserCollectedRewards(msg.sender, userRewards);
+    // }
+
+    /* ============ Public Functions ============ */
+    function getTwabSharesForNonTopPlayers(
+        uint256 _tokenID
+    ) public returns (PlayerTwabInfo[] memory) {
+        _requireTournamentManager();
+
+        require(
+            _setPlayerPlacementBool == true,
+            "Need to set player's placement before get player's twab info"
+        );
+
+        _calculateTwabSharesForNonTopPlayers(_tokenID);
+
+        PlayerTwabInfo[] memory playerTwabInfo = new PlayerTwabInfo[](
+            tournamentPlayersInfo.length
+        );
+
+        for (uint256 i = 0; i < tournamentPlayersInfo.length; i++) {
+            playerTwabInfo[i].player = tournamentPlayersInfo[i].player;
+            playerTwabInfo[i].share = twabSharesForNonTopPlayers[
+                tournamentPlayersInfo[i].player
+            ];
+        }
+
+        return playerTwabInfo;
     }
 
     /**
@@ -1001,6 +1129,43 @@ contract P2P is ITournament, Ownable {
         }
 
         return averageBalances;
+    }
+
+    /**
+     * @notice calculate Twab shares for non top players
+     */
+    function _calculateTwabSharesForNonTopPlayers(uint256 _tokenID) internal {
+        uint256 totalTwabFromNonTopPlayers;
+
+        for (uint256 i = 0; i < tournamentPlayersInfo.length; i++) {
+            if (
+                getPlacementByAddress(tournamentPlayersInfo[i].player) >
+                rewardTiers.topPlayersPayablePlacement
+            ) {
+                totalTwabFromNonTopPlayers += getAverageBalanceBetween(
+                    tournamentPlayersInfo[i].player,
+                    _tokenID,
+                    uint64(tournamentInfo.createdAt),
+                    uint64(block.timestamp)
+                );
+            }
+        }
+
+        for (uint256 i = 0; i < tournamentPlayersInfo.length; i++) {
+            if (
+                getPlacementByAddress(tournamentPlayersInfo[i].player) >
+                rewardTiers.topPlayersPayablePlacement
+            ) {
+                twabSharesForNonTopPlayers[tournamentPlayersInfo[i].player] =
+                    (getAverageBalanceBetween(
+                        tournamentPlayersInfo[i].player,
+                        _tokenID,
+                        uint64(tournamentInfo.createdAt),
+                        uint64(block.timestamp)
+                    ) * PRECISION_FACTOR) /
+                    totalTwabFromNonTopPlayers;
+            }
+        }
     }
 
     /**

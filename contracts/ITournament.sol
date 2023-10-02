@@ -59,9 +59,13 @@ interface ITournament {
 
     function depositERC20(uint256 _tokenID, uint256 _amount) external;
 
+    function depositETH() external payable;
+
     function lockDeposit(uint256 _tokenID, uint256 _amount) external;
 
-    function withdraw(uint256 _tokenID, uint256 _amount) external;
+    function withdrawERC20(uint256 _tokenID, uint256 _amount) external;
+
+    function withdrawETH(uint256 _amount) external payable;
 
     function withdrawLocked(uint256 _tokenID, uint256 _amount) external;
 }

@@ -59,7 +59,7 @@ contract SimpleTokenReflection is ERC20 {
 
         _beforeTokenTransfer(from, to, amount);
 
-        uint256 fromBalance = balanceOf(from);
+        uint256 fromBalance = _balances[from];
         require(
             fromBalance >= amount,
             "ERC20: transfer amount exceeds balance"
